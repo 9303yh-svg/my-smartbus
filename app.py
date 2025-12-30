@@ -18,147 +18,168 @@ ISRAEL_TZ = pytz.timezone('Asia/Jerusalem')
 
 st.set_page_config(page_title="SmartBus Pro", page_icon="🚍", layout="wide")
 
-st.title("🚍 SmartBus Pro - המפה המלאה")
-st.markdown("### מסלולים, תחנות ועומסי תנועה בזמן אמת")
+# --- כותרת ---
+st.title("🚍 SmartBus Pro")
 
-# --- סרגל צד ---
+# --- סרגל צד ראשי ---
 with st.sidebar:
-    st.header("לאן נוסעים?")
+    st.header("מערכת שליטה")
+    # בחירת מצב עבודה
+    mode = st.radio("בחר פעולה:", ["🗺️ תכנון מסלול (רגיל)", "🕵️‍♂️ חוקר קווים ספציפי"])
+    st.divider()
+
+    # משתנים משותפים
     origin = st.text_input("מוצא", "תחנה מרכזית נתניה")
     destination = st.text_input("יעד", "עזריאלי תל אביב")
     
-    st.divider()
-    st.subheader("הגדרות מפה")
-    show_traffic_layer = st.checkbox("הצג שכבת פקקים (כמו Waze)", value=True)
-    show_nearby_stops = st.checkbox("הצג תחנות אוטובוס באזור המוצא", value=False)
-    
-    st.divider()
-    time_option = st.selectbox("זמן יציאה", ["עכשיו", "בחר שעה"])
+    # הגדרות זמן
+    time_option = st.selectbox("זמן נסיעה", ["עכשיו", "בחר שעה עתידית"])
     check_time = datetime.now(ISRAEL_TZ)
-    
-    if time_option == "בחר שעה":
+    if time_option == "בחר שעה עתידית":
         d = st.date_input("תאריך", datetime.now().date())
         t = st.time_input("שעה", datetime.now().time())
         check_time = ISRAEL_TZ.localize(datetime.combine(d, t))
-    
-    search_btn = st.button("הצג מפה 🚀", type="primary")
 
-# --- הלוגיקה ---
+    # כפתור חיפוש
+    btn_label = "חפש מסלול 🚀" if mode == "🗺️ תכנון מסלול (רגיל)" else "הצג מסלול קו 🕵️‍♂️"
+    search_btn = st.button(btn_label, type="primary")
+
+    st.divider()
+    st.caption("פותח ע''י SmartBus AI")
+
+# --- לוגיקה ראשית ---
 if search_btn:
-    with st.spinner('מנתח נתונים, סורק תחנות ועומסים...'):
-        try:
-            req_timestamp = int(check_time.timestamp())
-            
-            # 1. חיפוש מסלול
-            directions = gmaps.directions(
-                origin, destination,
-                mode="transit", transit_mode="bus",
-                departure_time=req_timestamp, language='he'
-            )
-            
-            if not directions:
-                st.error("לא נמצא מסלול.")
-            else:
-                leg = directions[0]['legs'][0]
+    # מצב א': תכנון מסלול רגיל (מה שיש לנו עד עכשיו)
+    if mode == "🗺️ תכנון מסלול (רגיל)":
+        st.subheader(f"מסלול מומלץ: {origin} ⬅️ {destination}")
+        with st.spinner('מחשב מסלול אופטימלי...'):
+            try:
+                req_timestamp = int(check_time.timestamp())
+                directions = gmaps.directions(
+                    origin, destination,
+                    mode="transit", transit_mode="bus",
+                    departure_time=req_timestamp, language='he'
+                )
                 
-                # מטריקות
-                c1, c2, c3 = st.columns(3)
-                c1.metric("⏱️ זמן כולל", leg['duration']['text'])
-                c2.metric("🏁 שעת הגעה", leg['arrival_time']['text'])
-                c3.metric("📏 מרחק", leg['distance']['text'])
-                
-                # --- בניית המפה ---
-                start_lat = leg['start_location']['lat']
-                start_lng = leg['start_location']['lng']
-                m = folium.Map(location=[start_lat, start_lng], zoom_start=15)
-                
-                # 🚦 תוספת 1: שכבת פקקים של גוגל (Google Traffic Layer)
-                if show_traffic_layer:
-                    folium.TileLayer(
-                        tiles='https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}',
-                        attr='Google Traffic',
-                        name='Traffic',
-                        overlay=True,
-                        control=True
-                    ).add_to(m)
-
-                # 🚏 תוספת 2: חיפוש תחנות קרובות (באמצעות Places API)
-                if show_nearby_stops:
-                    try:
-                        places = gmaps.places_nearby(location=(start_lat, start_lng), radius=500, type='transit_station')
-                        for place in places.get('results', []):
-                            loc = place['geometry']['location']
-                            name = place['name']
-                            folium.Marker(
-                                [loc['lat'], loc['lng']],
-                                popup=name,
-                                tooltip=f"🚏 {name}",
-                                icon=folium.Icon(color='blue', icon='bus', prefix='fa')
-                            ).add_to(m)
-                    except Exception as e:
-                        st.warning(f"לא ניתן לטעון תחנות קרובות (אולי ה-API לא מאופשר): {e}")
-
-                # סימון מוצא ויעד
-                folium.Marker([start_lat, start_lng], tooltip="מוצא", icon=folium.Icon(color='green', icon='play')).add_to(m)
-                folium.Marker([leg['end_location']['lat'], leg['end_location']['lng']], tooltip="יעד", icon=folium.Icon(color='red', icon='stop')).add_to(m)
-
-                # ציור המסלול
-                for step in leg['steps']:
-                    points = polyline.decode(step['polyline']['points'])
+                if not directions:
+                    st.error("לא נמצא מסלול.")
+                else:
+                    leg = directions[0]['legs'][0]
                     
-                    if step['travel_mode'] == 'WALKING':
-                        folium.PolyLine(points, color="#3388ff", weight=4, opacity=0.6, dash_array='5, 10', tooltip="הליכה").add_to(m)
+                    # נתונים
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("זמן כולל", leg['duration']['text'])
+                    c2.metric("הגעה", leg['arrival_time']['text'])
+                    c3.metric("מרחק", leg['distance']['text'])
                     
-                    elif step['travel_mode'] == 'TRANSIT':
-                        details = step['transit_details']
-                        line_name = details['line']['short_name']
-                        
-                        # הוספת מרקר לכל תחנה שהאוטובוס עובר בה (אם קיים במידע)
-                        dept_stop = details['departure_stop']
-                        arr_stop = details['arrival_stop']
-                        
-                        # בדיקת פקקים על המסלול הספציפי
-                        seg_start = f"{dept_stop['location']['lat']},{dept_stop['location']['lng']}"
-                        seg_end = f"{arr_stop['location']['lat']},{arr_stop['location']['lng']}"
-                        seg_time = datetime.fromtimestamp(details['departure_time']['value'])
-                        
-                        color = "green"
-                        desc = "זורם"
-                        
-                        try:
-                            traf = gmaps.directions(seg_start, seg_end, mode="driving", departure_time=seg_time)
-                            if traf:
-                                t_leg = traf[0]['legs'][0]
-                                norm = t_leg['duration']['value']
-                                act = t_leg.get('duration_in_traffic', {}).get('value', norm)
-                                delay = (act - norm) / 60
-                                
-                                if delay > 12:
-                                    color = "red"
-                                    desc = f"עומס כבד (+{int(delay)} דק')"
-                                elif delay > 5:
-                                    color = "orange"
-                                    desc = f"עומס (+{int(delay)} דק')"
-                        except:
-                            pass
+                    # מפה
+                    start_loc = [leg['start_location']['lat'], leg['start_location']['lng']]
+                    m = folium.Map(location=start_loc, zoom_start=13)
+                    
+                    # שכבת פקקים כללית
+                    folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Google Traffic', name='Traffic').add_to(m)
 
-                        folium.PolyLine(
-                            points, 
-                            color=color, 
-                            weight=6, 
-                            opacity=0.8, 
-                            tooltip=f"קו {line_name}: {desc}"
-                        ).add_to(m)
+                    folium.Marker(start_loc, tooltip="מוצא", icon=folium.Icon(color='green', icon='play')).add_to(m)
+                    folium.Marker([leg['end_location']['lat'], leg['end_location']['lng']], tooltip="יעד", icon=folium.Icon(color='red', icon='stop')).add_to(m)
 
-                # הצגת המפה
-                map_html = m._repr_html_()
-                components.html(map_html, height=600)
-                
-                with st.expander("📝 פירוט מסלול מלא"):
+                    # ציור
                     for step in leg['steps']:
-                        instr = step['html_instructions']
-                        dur = step['duration']['text']
-                        st.write(f"- {dur}: {instr}", unsafe_allow_html=True)
+                        points = polyline.decode(step['polyline']['points'])
+                        color = "blue"
+                        weight = 4
+                        tooltip = "הליכה"
+                        
+                        if step['travel_mode'] == 'TRANSIT':
+                            line_name = step['transit_details']['line']['short_name']
+                            color = "black" # ברירת מחדל לאוטובוס
+                            weight = 6
+                            tooltip = f"קו {line_name}"
+                            
+                            # בדיקת פקקים ספציפית למקטע
+                            try:
+                                dept = step['transit_details']['departure_stop']['location']
+                                arr = step['transit_details']['arrival_stop']['location']
+                                dept_t = step['transit_details']['departure_time']['value']
+                                
+                                traf = gmaps.directions(f"{dept['lat']},{dept['lng']}", f"{arr['lat']},{arr['lng']}", mode="driving", departure_time=datetime.fromtimestamp(dept_t))
+                                if traf:
+                                    t_leg = traf[0]['legs'][0]
+                                    norm = t_leg['duration']['value']
+                                    act = t_leg.get('duration_in_traffic', {}).get('value', norm)
+                                    delay = (act - norm) / 60
+                                    
+                                    if delay > 10: color = "red"; tooltip += f" (פקק כבד +{int(delay)} דק')"
+                                    elif delay > 4: color = "orange"; tooltip += f" (עומס +{int(delay)} דק')"
+                                    else: color = "green"; tooltip += " (פנוי)"
+                            except: pass
+                            
+                        folium.PolyLine(points, color=color, weight=weight, opacity=0.8, tooltip=tooltip).add_to(m)
 
-        except Exception as e:
-            st.error(f"שגיאה: {e}")
+                    components.html(m._repr_html_(), height=500)
+                    
+                    with st.expander("פירוט שלבים"):
+                         for step in leg['steps']:
+                            st.write(f"{step['html_instructions']} ({step['duration']['text']})", unsafe_allow_html=True)
+
+            except Exception as e:
+                st.error(f"שגיאה: {e}")
+
+    # מצב ב': חוקר הקווים (חדש!)
+    elif mode == "🕵️‍♂️ חוקר קווים ספציפי":
+        st.subheader("ניתוח מסלול של קו ספציפי")
+        st.info("💡 במצב זה המערכת תחפש את הנתיב הטוב ביותר בין הנקודות ותציג את עומסי התנועה המדויקים עליו.")
+        
+        with st.spinner('מנתח את תוואי השטח והעומסים...'):
+            try:
+                req_timestamp = int(check_time.timestamp())
+                # כאן אנחנו מבקשים מסלול נהיגה אבל על תוואי של תחבורה ציבורית כדי לראות את הפקק המדויק
+                directions = gmaps.directions(
+                    origin, destination,
+                    mode="driving", # בודקים כרכב כדי לקבל מידע על פקקים
+                    departure_time=req_timestamp,
+                    language='he',
+                    traffic_model="best_guess"
+                )
+
+                if directions:
+                    leg = directions[0]['legs'][0]
+                    
+                    # חישוב עיכובים
+                    normal_duration = leg['duration']['value']
+                    traffic_duration = leg.get('duration_in_traffic', {}).get('value', normal_duration)
+                    delay_minutes = (traffic_duration - normal_duration) / 60
+                    
+                    # הצגת נתונים בולטים
+                    col1, col2 = st.columns(2)
+                    col1.metric("זמן נסיעה משוער", leg['duration_in_traffic']['text'])
+                    
+                    status_color = "green"
+                    status_text = "הדרך פנויה ✅"
+                    if delay_minutes > 15:
+                        status_color = "red"
+                        status_text = f"פקק כבד (+{int(delay_minutes)} דק') 🔥"
+                    elif delay_minutes > 5:
+                        status_color = "orange"
+                        status_text = f"עומס בינוני (+{int(delay_minutes)} דק') ⚠️"
+                    
+                    col2.markdown(f"### {status_text}")
+
+                    # מפה
+                    m = folium.Map(location=[leg['start_location']['lat'], leg['start_location']['lng']], zoom_start=14)
+                    
+                    # שכבת פקקים
+                    folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Google Traffic', name='Traffic').add_to(m)
+                    
+                    # ציור המסלול בצבע העומס
+                    points = polyline.decode(directions[0]['overview_polyline']['points'])
+                    folium.PolyLine(points, color=status_color, weight=8, opacity=0.7, tooltip=status_text).add_to(m)
+                    
+                    # מרקרים
+                    folium.Marker([leg['start_location']['lat'], leg['start_location']['lng']], popup="התחלה", icon=folium.Icon(color='green')).add_to(m)
+                    folium.Marker([leg['end_location']['lat'], leg['end_location']['lng']], popup="סוף", icon=folium.Icon(color='red')).add_to(m)
+
+                    components.html(m._repr_html_(), height=500)
+                else:
+                    st.error("לא נמצא מסלול כביש בין הנקודות.")
+            except Exception as e:
+                st.error(f"שגיאה: {e}")
