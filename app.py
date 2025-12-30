@@ -12,9 +12,10 @@ import googlemaps
 from datetime import datetime
 import pytz
 import polyline
+import time
 
 # --- הגדרות ---
-st.set_page_config(page_title="SmartBus Pro", page_icon="🚍", layout="wide")
+st.set_page_config(page_title="SmartBus Final", page_icon="🚍", layout="wide")
 DB_FILE = 'gtfs_israel.db'
 ISRAEL_TZ = pytz.timezone('Asia/Jerusalem')
 
@@ -62,216 +63,107 @@ def get_shape_sql(route_id):
     except: return []
     finally: conn.close()
 
-# --- עיצוב CSS מתקדם (מסדר את העברית והזמנים) ---
+# --- עיצוב CSS ---
 st.markdown("""
     <style>
-    /* יישור לימין לכל האפליקציה */
     .stApp { direction: rtl; }
-    
-    /* כרטיס תוצאה מעוצב */
-    .result-card {
-        background-color: white;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        margin-bottom: 10px;
-        border-right: 5px solid #581845;
-        direction: rtl;
-        text-align: right;
+    .wallet-card {
+        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        color: white; padding: 20px; border-radius: 15px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2); text-align: right;
     }
-    
-    .metric-box {
-        background: #f8f9fa;
-        padding: 10px;
-        border-radius: 5px;
-        text-align: center;
-        border: 1px solid #eee;
+    .warning-box {
+        background-color: #ffcccc; color: #990000; padding: 10px;
+        border-radius: 5px; margin-top: 10px; font-weight: bold; text-align: center;
     }
-    
-    /* תיקון לכיוון טקסט בכפתורי רדיו */
-    div[role="radiogroup"] { direction: rtl; text-align: right; }
-    p { text-align: right; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- פונקציית עזר לחישוב פקקים למקטע ---
-def get_traffic_delay(start, end, time):
-    try:
-        res = gmaps.directions(f"{start['lat']},{start['lng']}", f"{end['lat']},{end['lng']}", mode="driving", departure_time=time)
-        if res:
-            leg = res[0]['legs'][0]
-            norm = leg['duration']['value']
-            traf = leg.get('duration_in_traffic', {}).get('value', norm)
-            return max(0, (traf - norm) / 60)
-    except: pass
-    return 0
+# --- סרגל צד להגדרות ---
+with st.sidebar:
+    st.header("⚙️ הגדרות משתמש")
+    # הנה הסליידר שביקשת להחזיר
+    max_walking = st.slider("מקסימום הליכה (דקות):", 0, 30, 10)
+    st.info(f"מסלולים עם יותר מ-{max_walking} דקות הליכה יסומנו באזהרה.")
 
 # --- האפליקציה ---
-st.title("🚍 SmartBus Pro 15.0")
+st.title("🚍 SmartBus Final")
 
 # טאבים
-tab_plan, tab_lines, tab_stations, tab_gps = st.tabs(["🗺️ תכנון מסלול (חכם)", "🔢 איתור קו", "🚏 חיפוש תחנה", "📍 GPS"])
+tab_plan, tab_lines, tab_stations, tab_wallet = st.tabs(["🗺️ תכנון", "🔢 קווים", "🚏 תחנות", "💳 ארנק"])
 
 # ==========================================
-# 1. תכנון מסלול (המתוקן והמשודרג)
+# 1. ניווט ותכנון (עם סינון הליכה)
 # ==========================================
 with tab_plan:
-    st.caption("השוואת מסלולים, זמנים ופקקים")
-    
-    with st.form("route_planner"):
+    with st.form("nav_form"):
         c1, c2 = st.columns(2)
-        with c1: 
-            origin = st.text_input("מוצא (כתובת או שם תחנה)", "המיקום שלי")
-        with c2: 
-            dest = st.text_input("יעד (כתובת או שם תחנה)", "עזריאלי תל אביב")
-        
-        # --- בחירת זמן מתקדמת ---
-        st.write("---")
-        t_col1, t_col2, t_col3 = st.columns(3)
-        with t_col1:
-            time_mode = st.selectbox("סוג זמן", ["יציאה עכשיו", "יציאה בשעה...", "הגעה עד שעה..."])
-        
-        req_time = datetime.now()
-        is_arrival = False
-        
-        if time_mode != "יציאה עכשיו":
-            with t_col2: d = st.date_input("תאריך")
-            with t_col3: t = st.time_input("שעה")
-            req_time = datetime.combine(d, t)
-            if "הגעה" in time_mode: is_arrival = True
+        with c1: origin = st.text_input("מוצא", "המיקום שלי")
+        with c2: dest = st.text_input("יעד", "עזריאלי תל אביב")
+        submit_nav = st.form_submit_button("חפש מסלול 🚀")
 
-        # כפתור חיפוש
-        submitted = st.form_submit_button("חפש מסלול 🚀")
-
-    if submitted:
-        with st.spinner('⏳ מחשב מסלול, בודק פקקים ומסדר זמנים...'):
+    if submit_nav:
+        with st.spinner('מחשב מסלול...'):
             try:
-                real_origin = "תחנה מרכזית נתניה" if origin == "המיקום שלי" else origin
-                
-                # פרמטרים לגוגל
-                params = {
-                    "origin": real_origin,
-                    "destination": dest,
-                    "mode": "transit",
-                    "transit_mode": "bus",
-                    "alternatives": True,
-                    "language": "he"
-                }
-                
-                # טיפול בזמנים (הגעה או יציאה)
-                if is_arrival:
-                    params["arrival_time"] = req_time
-                else:
-                    params["departure_time"] = req_time
-                
-                routes = gmaps.directions(**params)
+                real_orig = "תחנה מרכזית נתניה" if origin == "המיקום שלי" else origin
+                routes = gmaps.directions(real_orig, dest, mode="transit", transit_mode="bus", language='he', alternatives=True)
                 
                 if routes:
-                    # --- עיבוד התוצאות לתצוגה יפה ---
-                    options = []
+                    st.success(f"נמצאו {len(routes)} אפשרויות:")
                     
-                    for idx, r in enumerate(routes):
-                        leg = r['legs'][0]
-                        duration = leg['duration']['text'].replace("hours", "שעות").replace("mins", "דקות").replace("hour", "שעה")
-                        
-                        # חישוב הליכה
-                        walk_sec = sum([s['duration']['value'] for s in leg['steps'] if s['travel_mode']=='WALKING'])
-                        walk_min = int(walk_sec / 60)
-                        
-                        # כותרת ברורה לרדיו
-                        label = f"אופציה {idx+1}: ⏱️ {duration} | 🚶 {walk_min} דק' הליכה"
-                        
-                        # שמירת המידע
-                        options.append({
-                            "label": label,
-                            "data": r,
-                            "walk": walk_min,
-                            "duration_text": duration
-                        })
+                    # בחירת מסלול
+                    selected_route_idx = st.radio(
+                        "בחר מסלול:",
+                        options=range(len(routes)),
+                        format_func=lambda i: f"אפשרות {i+1}: {routes[i]['legs'][0]['duration']['text']}"
+                    )
                     
-                    st.success(f"נמצאו {len(options)} אפשרויות נסיעה:")
+                    leg = routes[selected_route_idx]['legs'][0]
                     
-                    # בחירת מסלול עם תצוגה מתוקנת
-                    selection = st.radio("בחר מסלול להצגה:", options, format_func=lambda x: x["label"])
+                    # חישוב הליכה כולל
+                    total_walk_sec = sum([s['duration']['value'] for s in leg['steps'] if s['travel_mode']=='WALKING'])
+                    total_walk_min = int(total_walk_sec / 60)
                     
-                    if selection:
-                        r = selection["data"]
-                        leg = r['legs'][0]
-                        
-                        # --- כרטיס מידע מפורט (HTML) ---
-                        # כאן אנחנו מסדרים את הזמנים בצורה גרפית יפה
-                        dep_time = leg['departure_time']['text']
-                        arr_time = leg['arrival_time']['text']
-                        
-                        st.markdown(f"""
-                        <div class="result-card">
-                            <h3 style="margin:0; color:#581845;">פרטי המסלול הנבחר</h3>
-                            <div style="display:flex; justify-content:space-around; margin-top:10px;">
-                                <div class="metric-box"><b>🛫 יציאה</b><br>{dep_time}</div>
-                                <div class="metric-box"><b>⏱️ משך</b><br>{selection['duration_text']}</div>
-                                <div class="metric-box"><b>🏁 הגעה</b><br>{arr_time}</div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    # אזהרת הליכה (הפיצ'ר שחזר)
+                    if total_walk_min > max_walking:
+                        st.warning(f"⚠️ שים לב: מסלול זה דורש {total_walk_min} דקות הליכה (יותר מ-{max_walking} שהגדרת).")
+                    else:
+                        st.info(f"✅ מסלול נוח: רק {total_walk_min} דקות הליכה.")
 
-                        # --- המפה ---
-                        m = folium.Map(location=[leg['start_location']['lat'], leg['start_location']['lng']], zoom_start=13)
-                        folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m)
-                        
-                        # ציור המסלול
-                        path_pts = []
-                        for step in leg['steps']:
-                            pts = polyline.decode(step['polyline']['points'])
-                            path_pts.extend(pts)
-                            
-                            if step['travel_mode'] == 'TRANSIT':
-                                # קו אוטובוס
-                                line = step['transit_details']['line']['short_name']
-                                
-                                # בדיקת פקק קטנה
-                                traffic_add = 0
-                                if not is_arrival: # אי אפשר לבדוק פקקים עתידיים מדויק, רק נוכחי או יציאה
-                                    d_time = datetime.fromtimestamp(step['transit_details']['departure_time']['value'])
-                                    traffic_add = get_traffic_delay(step['transit_details']['departure_stop']['location'], step['transit_details']['arrival_stop']['location'], d_time)
-                                
-                                color = "#581845"
-                                tooltip = f"קו {line}"
-                                if traffic_add > 5: 
-                                    color = "red"
-                                    tooltip += f" (עומס +{int(traffic_add)} דק')"
-                                
-                                folium.PolyLine(pts, color=color, weight=6, opacity=0.8, tooltip=tooltip).add_to(m)
-                            else:
-                                # הליכה
-                                folium.PolyLine(pts, color="blue", weight=4, dash_array='5, 10', opacity=0.5, tooltip="הליכה").add_to(m)
-                                
-                        # זום למסלול
-                        m.fit_bounds(path_pts)
-                        components.html(m._repr_html_(), height=450)
-                        
-                        # הוראות כתובות (מתוקנות RTL)
-                        with st.expander("📝 הוראות נסיעה מפורטות"):
-                            for step in leg['steps']:
-                                instr = step['html_instructions']
-                                dist = step['distance']['text']
-                                st.markdown(f"<div style='direction:rtl; text-align:right;'>• {instr} ({dist})</div>", unsafe_allow_html=True)
+                    # מפה
+                    m = folium.Map(location=[leg['start_location']['lat'], leg['start_location']['lng']], zoom_start=14)
+                    folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m)
+                    
+                    path_pts = []
+                    for step in leg['steps']:
+                        pts = polyline.decode(step['polyline']['points'])
+                        path_pts.extend(pts)
+                        if step['travel_mode'] == 'TRANSIT':
+                            line = step['transit_details']['line']['short_name']
+                            folium.PolyLine(pts, color="#581845", weight=6, opacity=0.8, tooltip=f"קו {line}").add_to(m)
+                        else:
+                            folium.PolyLine(pts, color="blue", dash_array='5, 10', weight=4, opacity=0.6).add_to(m)
+                    
+                    m.fit_bounds(path_pts)
+                    components.html(m._repr_html_(), height=400)
+                    
                 else:
-                    st.error("לא נמצאו מסלולים לחיפוש זה.")
+                    st.error("לא נמצא מסלול.")
             except Exception as e:
-                st.error(f"אירעה שגיאה: {e}")
+                st.error(f"שגיאה: {e}")
 
 # ==========================================
 # 2. איתור קו (SQL)
 # ==========================================
 with tab_lines:
     if init_database():
-        line = st.text_input("הכנס מספר קו:", "")
+        line = st.text_input("מספר קו:", "")
         if line:
             res = get_routes_sql(line)
             if not res.empty:
                 opts = {f"{r['route_long_name']}": r['route_id'] for i, r in res.iterrows()}
-                sel = st.selectbox("בחר כיוון:", list(opts.keys()))
-                if st.button("הצג מסלול"):
+                sel = st.selectbox("כיוון:", list(opts.keys()))
+                if st.button("הצג"):
                     pts = get_shape_sql(opts[sel])
                     if pts:
                         mid = pts[len(pts)//2]
@@ -282,28 +174,71 @@ with tab_lines:
             else: st.warning("לא נמצא")
 
 # ==========================================
-# 3. חיפוש תחנה
+# 3. חיפוש תחנה (משופר - מרכז + סביבה)
 # ==========================================
 with tab_stations:
-    st.info("חפש תחנה ספציפית כדי לראות את מיקומה")
+    st.info("מציג את התחנה המבוקשת ואת הסביבה שלה")
     q = st.text_input("שם תחנה:", "סבידור מרכז")
-    if st.button("מצא תחנה"):
+    if st.button("מצא והצג סביבה 🔎"):
         r = gmaps.places(query=q)
         if r['status'] == 'OK':
-            loc = r['results'][0]['geometry']['location']
+            # 1. התחנה הראשית שנמצאה
+            main_loc = r['results'][0]['geometry']['location']
             name = r['results'][0]['name']
-            m3 = folium.Map(location=[loc['lat'], loc['lng']], zoom_start=17)
+            
+            # 2. יצירת מפה ממוקדת עליה
+            m3 = folium.Map(location=[main_loc['lat'], main_loc['lng']], zoom_start=17)
             folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m3)
-            folium.Marker([loc['lat'], loc['lng']], popup=name, icon=folium.Icon(color='blue', icon='bus', prefix='fa')).add_to(m3)
-            components.html(m3._repr_html_(), height=400)
+            
+            # מרקר ראשי (אדום וגדול)
+            folium.Marker(
+                [main_loc['lat'], main_loc['lng']], 
+                popup=name, 
+                tooltip="התחנה שחיפשת",
+                icon=folium.Icon(color='red', icon='star', prefix='fa')
+            ).add_to(m3)
+            
+            # 3. הוספת תחנות סביבה (הפיצ'ר החדש)
+            try:
+                nearby = gmaps.places_nearby(location=main_loc, radius=300, type='transit_station')
+                for p in nearby.get('results', []):
+                    # לא להוסיף את אותה תחנה פעמיים
+                    if p['place_id'] != r['results'][0]['place_id']:
+                        ploc = p['geometry']['location']
+                        folium.Marker(
+                            [ploc['lat'], ploc['lng']],
+                            tooltip=p['name'],
+                            icon=folium.Icon(color='blue', icon='bus', prefix='fa') # כחול וקטן יותר
+                        ).add_to(m3)
+            except: pass
+            
+            components.html(m3._repr_html_(), height=450)
+            st.success(f"נמצאה: {name} (וסימנו תחנות נוספות בכחול מסביב)")
+        else:
+            st.error("תחנה לא נמצאה")
 
 # ==========================================
-# 4. GPS
+# 4. ארנק (עם אזהרה ברורה)
 # ==========================================
-with tab_gps:
-    if st.button("איפה אני?"):
-        m4 = folium.Map(location=[32.08, 34.78], zoom_start=14)
-        from folium import plugins
-        plugins.LocateControl(auto_start=True).add_to(m4)
-        folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m4)
-        st_folium(m4, height=500)
+with tab_wallet:
+    st.markdown("""
+    <div class="wallet-card">
+        <div style="font-size:14px;">יתרה זמינה</div>
+        <div style="font-size:32px; font-weight:bold;">₪ 45.90</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if st.button("📷 סרוק ותקף נסיעה", type="primary", use_container_width=True):
+        with st.spinner("מתחבר..."):
+            time.sleep(1.5)
+        st.balloons()
+        st.success("✅ האישור התקבל!")
+        
+        # האזהרה החשובה
+        st.markdown("""
+            <div class="warning-box">
+            🛑 שים לב: זוהי סימולציה בלבד!<br>
+            תשלום זה אינו אמיתי ולא יתקבל ע"י פקחים.<br>
+            לנסיעה בפועל יש להשתמש באפליקציות המורשות.
+            </div>
+        """, unsafe_allow_html=True)
