@@ -1,186 +1,165 @@
 import streamlit as st
-import googlemaps
-from datetime import datetime
-import pytz
+import pandas as pd
 import folium
-import polyline
 from streamlit_folium import st_folium
-from folium import plugins
+import requests
+import zipfile
+import io
+import sqlite3
+import os
 
-# --- התחברות לגוגל ---
-try:
-    api_key = st.secrets["GOOGLE_API_KEY"]
-except:
-    st.error("⚠️ מפתח API חסר.")
-    st.stop()
+# --- הגדרות ---
+st.set_page_config(page_title="SmartBus SQL", page_icon="💾", layout="wide")
+DB_FILE = 'gtfs_israel.db'
 
-gmaps = googlemaps.Client(key=api_key)
-ISRAEL_TZ = pytz.timezone('Asia/Jerusalem')
+# --- שלב 1: פונקציות המנוע (בניית מסד הנתונים) ---
+@st.cache_resource(show_spinner=False)
+def init_database():
+    """
+    בודק אם קיים קובץ מסד נתונים.
+    אם לא - מוריד את ה-ZIP הממשלתי, וממיר אותו ל-SQL מקומי.
+    """
+    if os.path.exists(DB_FILE):
+        return True # המסד כבר קיים, אפשר להתקדם
 
-st.set_page_config(page_title="SmartBus Stable", page_icon="🚍", layout="centered", initial_sidebar_state="collapsed")
-
-# --- עיצוב למניעת קריסות ושיפור מובייל ---
-st.markdown("""
-    <style>
-    /* הסתרת תפריטים מיותרים */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    status_text = st.empty()
+    progress_bar = st.progress(0)
     
-    /* כפתורים יציבים */
-    .stButton>button {
-        width: 100%;
-        height: 3em;
-        border-radius: 12px;
-        font-size: 18px;
-        background-color: #FF4B4B;
-        color: white;
-    }
-    
-    /* תיקון לכיוון טקסט בטלפון */
-    input {
-        direction: rtl;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("🚍 SmartBus")
-
-# --- לשוניות ---
-tab1, tab2 = st.tabs(["🏠 מסלול וקווים", "📍 המיקום שלי"])
-
-# === לשונית 1: חיפוש יציב (בתוך טופס) ===
-with tab1:
-    st.info("🔎 חפש מסלול או בדוק קו ספציפי")
-    
-    # שימוש ב-Form מונע ריענון אוטומטי וקריסות בטלפון!
-    with st.form("route_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            origin = st.text_input("מוצא", "תחנה מרכזית נתניה")
-        with col2:
-            destination = st.text_input("יעד", "עזריאלי תל אביב")
+    try:
+        # 1. הורדה
+        status_text.text("📥 מוריד את מאגר משרד התחבורה (פעם ראשונה בלבד)...")
+        url = "https://gtfs.mot.gov.il/gtfsfiles/israel-public-transportation.zip"
+        r = requests.get(url)
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        progress_bar.progress(30)
         
-        # אופציה לסינון קו
-        line_filter = st.text_input("סינון לפי קו (אופציונלי - למשל 910)", "")
+        # 2. פתיחת חיבור ל-SQL
+        conn = sqlite3.connect(DB_FILE)
         
-        submitted = st.form_submit_button("חפש מסלול ופקקים 🚀")
+        # 3. המרת הקבצים לטבלאות (רק מה שחשוב)
+        # טוענים Routes (קווים)
+        status_text.text("⚙️ בונה אינדקס קווים...")
+        routes = pd.read_csv(z.open('routes.txt'), usecols=['route_id', 'route_short_name', 'route_long_name'])
+        routes.to_sql('routes', conn, if_exists='replace', index=False)
+        progress_bar.progress(50)
+        
+        # טוענים Trips (נסיעות - כדי לקשר בין קו למפה)
+        status_text.text("⚙️ מקשר נסיעות...")
+        trips = pd.read_csv(z.open('trips.txt'), usecols=['route_id', 'shape_id'])
+        # שמירת נסיעה אחת לדוגמה לכל קו (חוסך המון מקום)
+        trips = trips.drop_duplicates(subset=['route_id'])
+        trips.to_sql('trips', conn, if_exists='replace', index=False)
+        progress_bar.progress(70)
+        
+        # טוענים Shapes (הציור על המפה - החלק הכבד)
+        status_text.text("⚙️ מסרטט מפות (זה לוקח רגע)...")
+        # קוראים בבלוקים כדי לא לקרוס
+        chunksize = 100000
+        for chunk in pd.read_csv(z.open('shapes.txt'), chunksize=chunksize):
+            chunk.to_sql('shapes', conn, if_exists='append', index=False)
+        progress_bar.progress(90)
+        
+        # 4. יצירת אינדקסים (זה הסוד למהירות!)
+        status_text.text("⚡ מייצר אינדקסים לחיפוש מהיר...")
+        conn.execute("CREATE INDEX idx_route_name ON routes(route_short_name)")
+        conn.execute("CREATE INDEX idx_shape_id ON shapes(shape_id)")
+        conn.close()
+        
+        progress_bar.progress(100)
+        status_text.success("✅ מסד הנתונים מוכן!")
+        return True
 
-    if submitted:
-        if not origin or not destination:
-            st.error("נא להזין מוצא ויעד")
-        else:
-            with st.spinner('מנתח מסלול...'):
-                try:
-                    # שלב א: חיפוש המסלול בתחבורה ציבורית
-                    directions = gmaps.directions(
-                        origin, destination,
-                        mode="transit", transit_mode="bus",
-                        departure_time=datetime.now(), language='he'
-                    )
+    except Exception as e:
+        st.error(f"שגיאה בבניית המסד: {e}")
+        return False
 
-                    if directions:
-                        leg = directions[0]['legs'][0]
-                        start_loc = leg['start_location']
-                        
-                        # שלב ב: יצירת המפה
-                        m = folium.Map(location=[start_loc['lat'], start_loc['lng']], zoom_start=13)
-                        
-                        # תוספת קריטית: כפתור GPS למיקום בזמן אמת
-                        plugins.LocateControl(auto_start=False, strings={"title": "הצג את המיקום שלי"}).add_to(m)
-                        
-                        # שכבת פקקים
-                        folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Google Traffic', name='Traffic', overlay=True).add_to(m)
+# --- שלב 2: פונקציות שליפה (SQL Queries) ---
+def get_routes_by_number(line_number):
+    conn = sqlite3.connect(DB_FILE)
+    query = "SELECT * FROM routes WHERE route_short_name = ?"
+    df = pd.read_sql_query(query, conn, params=(line_number,))
+    conn.close()
+    return df
 
-                        # שלב ג: ציור המסלול + טיפול בקו המבוקש
-                        found_specific_line = False
-                        
-                        for step in leg['steps']:
-                            points = polyline.decode(step['polyline']['points'])
-                            color = "gray"
-                            weight = 4
-                            opacity = 0.5
-                            tooltip = "הליכה/אחר"
-                            
-                            if step['travel_mode'] == 'TRANSIT':
-                                line_name = step['transit_details']['line']['short_name']
-                                headsign = step['transit_details']['headsign']
-                                
-                                # אם המשתמש ביקש קו ספציפי, נבדוק אם זה הקו הזה
-                                is_target_line = (line_filter in line_name) if line_filter else True
-                                
-                                if is_target_line:
-                                    if line_filter: found_specific_line = True
-                                    color = "blue" # ברירת מחדל
-                                    weight = 6
-                                    opacity = 0.8
-                                    tooltip = f"קו {line_name} לכיוון {headsign}"
-                                    
-                                    # בדיקת פקקים (רק לקווים הרלוונטיים)
-                                    try:
-                                        dept = step['transit_details']['departure_stop']['location']
-                                        arr = step['transit_details']['arrival_stop']['location']
-                                        dept_time = step['transit_details']['departure_time']['value']
-                                        
-                                        # בדיקת "רכב" על המסלול הזה
-                                        traf_chk = gmaps.directions(
-                                            f"{dept['lat']},{dept['lng']}",
-                                            f"{arr['lat']},{arr['lng']}",
-                                            mode="driving",
-                                            departure_time=datetime.fromtimestamp(dept_time)
-                                        )
-                                        if traf_chk:
-                                            t_dur = traf_chk[0]['legs'][0].get('duration_in_traffic', {}).get('value', 0)
-                                            n_dur = traf_chk[0]['legs'][0]['duration']['value']
-                                            delay = (t_dur - n_dur) / 60
-                                            
-                                            if delay > 10: 
-                                                color = "red"
-                                                tooltip += f" (פקק כבד +{int(delay)} דק')"
-                                            elif delay > 3: 
-                                                color = "orange"
-                                                tooltip += f" (עומס +{int(delay)} דק')"
-                                            else:
-                                                color = "green"
-                                                tooltip += " (פנוי)"
-                                    except:
-                                        pass
+def get_shape_points(route_id):
+    conn = sqlite3.connect(DB_FILE)
+    # א. מוצאים את ה-shape_id של הקו
+    trip_query = "SELECT shape_id FROM trips WHERE route_id = ?"
+    trip_df = pd.read_sql_query(trip_query, conn, params=(route_id,))
+    
+    if trip_df.empty:
+        conn.close()
+        return []
+    
+    shape_id = trip_df.iloc[0]['shape_id']
+    
+    # ב. שולפים את הנקודות לפי הסדר
+    shape_query = "SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY shape_pt_sequence"
+    shape_df = pd.read_sql_query(shape_query, conn, params=(shape_id,))
+    conn.close()
+    
+    # המרה לרשימה של (lat, lon)
+    return list(zip(shape_df['shape_pt_lat'], shape_df['shape_pt_lon']))
 
-                            folium.PolyLine(points, color=color, weight=weight, opacity=opacity, tooltip=tooltip).add_to(m)
+# --- הממשק (UI) ---
+st.title("🚍 SmartBus Pro - חיפוש מבוסס SQL")
 
-                        # הצגת תוצאות
-                        if line_filter and not found_specific_line:
-                            st.warning(f"המסלול נמצא, אך קו {line_filter} אינו חלק מהדרך המהירה ביותר כרגע. מוצג המסלול האופטימלי.")
-                        else:
-                            st.success(f"נמצא מסלול: {leg['duration']['text']}")
-
-                        # אייקונים
-                        folium.Marker([start_loc['lat'], start_loc['lng']], popup="מוצא", icon=folium.Icon(color='green', icon='play')).add_to(m)
-                        folium.Marker([leg['end_location']['lat'], leg['end_location']['lng']], popup="יעד", icon=folium.Icon(color='red', icon='stop')).add_to(m)
-
-                        st_folium(m, height=400, width="100%")
-                        
-                        with st.expander("פירוט מלא של המסלול"):
-                            for step in leg['steps']:
-                                st.write(step['html_instructions'], unsafe_allow_html=True)
-
+# הפעלת המנוע
+if init_database():
+    
+    col_search, col_map = st.columns([1, 2])
+    
+    with col_search:
+        st.subheader("🔎 חיפוש קו")
+        # חיפוש חופשי
+        line_input = st.text_input("הכנס מספר קו (למשל 480, 5, 1)", "")
+        
+        if line_input:
+            # שליפה מהירה מה-SQL
+            results = get_routes_by_number(line_input)
+            
+            if not results.empty:
+                st.success(f"נמצאו {len(results)} מסלולים לקו {line_input}")
+                
+                # בחירת כיוון ספציפי
+                route_dict = {f"{row['route_long_name']}": row['route_id'] for idx, row in results.iterrows()}
+                selected_desc = st.radio("בחר מסלול:", list(route_dict.keys()))
+                
+                if st.button("הצג מסלול ופקקים 🚦"):
+                    selected_id = route_dict[selected_desc]
+                    
+                    # שליפת המסלול מה-SQL
+                    with st.spinner('שולף נתוני מפה...'):
+                        path_points = get_shape_points(selected_id)
+                    
+                    if path_points:
+                        # שמירה ב-Session State כדי שהמפה לא תיעלם
+                        st.session_state['current_path'] = path_points
+                        st.session_state['current_title'] = f"קו {line_input}: {selected_desc}"
                     else:
-                        st.error("לא נמצא מסלול בין היעדים.")
-                except Exception as e:
-                    st.error(f"שגיאה: {e}")
+                        st.warning("לא נמצא שרטוט מפה לקו זה.")
+            else:
+                st.warning("הקו לא נמצא במאגר.")
 
-# === לשונית 2: המיקום שלי (GPS) ===
-with tab2:
-    st.info("📡 לחץ על הכפתור השחור במפה כדי להתמקד במיקום שלך")
-    
-    if st.button("טען מפת סביבה"):
-        # ברירת מחדל (מרכז הארץ), המשתמש ילחץ על GPS
-        m_loc = folium.Map(location=[32.08, 34.78], zoom_start=12)
-        
-        # כפתור GPS
-        plugins.LocateControl(auto_start=True).add_to(m_loc)
-        
-        # שכבת פקקים
-        folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m_loc)
-        
-        st_folium(m_loc, height=500, width="100%")
+    with col_map:
+        # הצגת המפה אם יש נתונים
+        if 'current_path' in st.session_state:
+            path = st.session_state['current_path']
+            title = st.session_state.get('current_title', '')
+            
+            # מרכוז המפה
+            mid_node = path[len(path)//2]
+            m = folium.Map(location=mid_node, zoom_start=12)
+            
+            # שכבת פקקים
+            folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Google Traffic', name='Traffic', overlay=True).add_to(m)
+            
+            # הוספת הקו
+            folium.PolyLine(path, color="red", weight=6, opacity=0.8, tooltip=title).add_to(m)
+            
+            # התחלה וסוף
+            folium.Marker(path[0], icon=folium.Icon(color='green', icon='play'), tooltip="מוצא").add_to(m)
+            folium.Marker(path[-1], icon=folium.Icon(color='red', icon='stop'), tooltip="יעד").add_to(m)
+            
+            st.info(f"מציג: {title}")
+            st_folium(m, height=600, width="100%")
