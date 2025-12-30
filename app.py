@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import folium
+from folium import plugins  # <--- הנה השורה שהייתה חסרה!
 from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 import requests
@@ -67,35 +68,15 @@ def get_shape_sql(route_id):
 st.markdown("""
     <style>
     .stApp { direction: rtl; }
-    
-    /* כרטיס ניווט לייב */
-    .live-step {
-        background-color: #e3f2fd;
-        border-right: 6px solid #2196f3;
-        padding: 15px;
-        margin-bottom: 10px;
-        border-radius: 8px;
-        font-size: 18px;
-    }
-    
-    /* מספר סליידר גדול */
-    .slider-val {
-        font-size: 24px; font-weight: bold; color: #FF4B4B; text-align: center;
-        background: #fff0f0; padding: 5px; border-radius: 5px; margin-bottom: 10px;
-    }
-    
-    .wallet-card {
-        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-        color: white; padding: 20px; border-radius: 15px; text-align: right;
-    }
+    .live-step { background-color: #e3f2fd; border-right: 6px solid #2196f3; padding: 15px; margin-bottom: 10px; border-radius: 8px; font-size: 18px; }
+    .slider-val { font-size: 24px; font-weight: bold; color: #FF4B4B; text-align: center; background: #fff0f0; padding: 5px; border-radius: 5px; margin-bottom: 10px; }
+    .wallet-card { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; padding: 20px; border-radius: 15px; text-align: right; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- סרגל צד משופר ---
+# --- סרגל צד ---
 with st.sidebar:
     st.header("⚙️ הגדרות אישיות")
-    
-    # 1. סליידר עם תצוגה ברורה (התיקון שביקשת)
     max_walking = st.slider("מקסימום הליכה (דקות):", 0, 30, 10)
     st.markdown(f"<div class='slider-val'>🚶 {max_walking} דקות</div>", unsafe_allow_html=True)
     st.caption("מסלולים ארוכים מזה יסומנו באזהרה.")
@@ -110,21 +91,17 @@ tab_nav, tab_lines, tab_stations, tab_wallet = st.tabs(["🗺️ תכנון ונ
 # 1. תכנון מסלול + ניווט לייב
 # ==========================================
 with tab_nav:
-    # מצב ניווט לייב (מוסתר כברירת מחדל)
     if 'live_nav_data' not in st.session_state:
         st.session_state.live_nav_data = None
 
-    # אם יש ניווט פעיל - מציגים אותו במסך מלא
     if st.session_state.live_nav_data:
         st.info("🟢 מצב ניווט חי פעיל")
         nav_data = st.session_state.live_nav_data
         
-        # כפתור יציאה
         if st.button("❌ סיים ניווט"):
             st.session_state.live_nav_data = None
             st.rerun()
             
-        # כפתור לגוגל מפות (הדבר האמיתי)
         gmaps_link = f"https://www.google.com/maps/dir/?api=1&origin={nav_data['origin']}&destination={nav_data['dest']}&travelmode=transit"
         st.markdown(f"""
             <a href="{gmaps_link}" target="_blank">
@@ -134,7 +111,6 @@ with tab_nav:
             </a>
         """, unsafe_allow_html=True)
 
-        # הצגת השלבים בגדול (LIVEMODE)
         st.subheader("הוראות הדרך:")
         for step in nav_data['steps']:
             instr = step['html_instructions']
@@ -143,13 +119,11 @@ with tab_nav:
             st.markdown(f"<div class='live-step'>{icon} {instr} ({dist})</div>", unsafe_allow_html=True)
             
     else:
-        # הטופס הרגיל
         with st.form("nav_form"):
             c1, c2 = st.columns(2)
             with c1: origin = st.text_input("מוצא", "המיקום שלי")
             with c2: dest = st.text_input("יעד", "עזריאלי תל אביב")
             
-            # אפשרויות זמן
             t_col1, t_col2 = st.columns(2)
             with t_col1:
                 time_mode = st.selectbox("זמן", ["יציאה עכשיו", "יציאה ב...", "הגעה ב..."])
@@ -168,7 +142,6 @@ with tab_nav:
             with st.spinner('מחשב...'):
                 try:
                     real_origin = "תחנה מרכזית נתניה" if origin == "המיקום שלי" else origin
-                    
                     params = {
                         "origin": real_origin, "destination": dest,
                         "mode": "transit", "transit_mode": "bus",
@@ -181,7 +154,6 @@ with tab_nav:
                     
                     if routes:
                         st.success(f"נמצאו {len(routes)} אפשרויות:")
-                        
                         options = []
                         for i, r in enumerate(routes):
                             leg = r['legs'][0]
@@ -197,18 +169,13 @@ with tab_nav:
                             r = sel['data']
                             leg = r['legs'][0]
                             
-                            # כפתור הפעלת ניווט לייב (הפיצ'ר החדש!)
                             if st.button("🚶‍♂️ התחל ניווט לייב (Live Mode)", type="primary"):
                                 st.session_state.live_nav_data = {
-                                    "steps": leg['steps'],
-                                    "origin": real_origin,
-                                    "dest": dest
+                                    "steps": leg['steps'], "origin": real_origin, "dest": dest
                                 }
                                 st.rerun()
 
-                            # מפה רגילה
                             m = folium.Map(location=[leg['start_location']['lat'], leg['start_location']['lng']], zoom_start=14)
-                            from folium import plugins
                             plugins.LocateControl(auto_start=False).add_to(m)
                             folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m)
                             
@@ -221,7 +188,6 @@ with tab_nav:
                             
                             m.fit_bounds(pts_all)
                             components.html(m._repr_html_(), height=400)
-
                     else: st.error("לא נמצא מסלול.")
                 except Exception as e: st.error(f"שגיאה: {e}")
 
@@ -247,52 +213,37 @@ with tab_lines:
             else: st.warning("לא נמצא")
 
 # ==========================================
-# 3. תחנות סביבי (הפיצ'ר המתוקן)
+# 3. תחנות סביבי
 # ==========================================
 with tab_stations:
     st.caption("מציאת תחנות במיקום שלי או לפי חיפוש")
-    
     col_me, col_search = st.columns([1, 2])
-    
-    # חיפוש לפי כתובת
-    with col_search:
-        q_stat = st.text_input("חיפוש כתובת/תחנה:", "")
-        
-    # כפתור המיקום שלי
+    with col_search: q_stat = st.text_input("חיפוש כתובת/תחנה:", "")
     with col_me:
-        st.write("") # מרווח
+        st.write("") 
         st.write("") 
         use_gps = st.button("📍 מצא תחנות סביבי")
 
     if use_gps or (q_stat and st.button("חפש 🔎")):
         loc_center = None
-        
         if use_gps:
-            # מכיוון שאין GPS בשרת, אנו נפתח מפה שממורכזת על ישראל עם כפתור GPS לחוץ
-            # המשתמש יצטרך ללחוץ על הכפתור השחור במפה
             st.info("👈 לחץ על הכפתור השחור במפה (בצד שמאל למעלה) כדי להתמקד במיקום שלך ולראות תחנות.")
-            loc_center = [32.08, 34.78] # ברירת מחדל
+            loc_center = [32.08, 34.78]
         elif q_stat:
-            # גיאוקודינג
             geo = gmaps.geocode(q_stat)
             if geo:
                 l = geo[0]['geometry']['location']
                 loc_center = [l['lat'], l['lng']]
-            else:
-                st.error("כתובת לא נמצאה")
+            else: st.error("כתובת לא נמצאה")
 
         if loc_center:
             m3 = folium.Map(location=loc_center, zoom_start=16)
-            
-            # כפתור GPS - חובה!
+            # הוספת הכפתור שתוקן
             plugins.LocateControl(auto_start=(True if use_gps else False)).add_to(m3)
-            
             folium.TileLayer('https://mt1.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', attr='Traffic', overlay=True).add_to(m3)
             
-            # אם זה חיפוש טקסט, נסמן את המרכז
             if q_stat and not use_gps:
                 folium.Marker(loc_center, icon=folium.Icon(color='red', icon='star')).add_to(m3)
-                # חיפוש תחנות מסביב לכתובת
                 try:
                     nearby = gmaps.places_nearby(location=(loc_center[0], loc_center[1]), radius=500, type='transit_station')
                     for p in nearby.get('results', []):
@@ -306,11 +257,7 @@ with tab_stations:
 # 4. ארנק
 # ==========================================
 with tab_wallet:
-    st.markdown("""
-    <div class="wallet-card">
-        <div>יתרה</div><div style="font-size:32px; font-weight:bold;">₪ 45.90</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("""<div class="wallet-card"><div>יתרה</div><div style="font-size:32px; font-weight:bold;">₪ 45.90</div></div>""", unsafe_allow_html=True)
     if st.button("📷 שלם", type="primary", use_container_width=True):
         with st.spinner("..."): time.sleep(1)
         st.balloons()
