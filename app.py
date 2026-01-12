@@ -688,4 +688,88 @@ with tab3:
                             loc = [l['lat'], l['lng']]
                     except Exception as e:
                         st.error(f"לא נמצא מיקום: {str(e)}")
-                        loc =
+                        loc = None
+            
+            if loc:
+                st.session_state.user_location = loc
+                
+                # קבלת תחנות
+                stations = get_nearby_stations(loc[0], loc[1], radius=500)
+                
+                if stations:
+                    # חלוקה לשתי עמודות - מפה ורשימה
+                    col_map, col_list = st.columns([2, 1])
+                    
+                    # עמודת המפה
+                    with col_map:
+                        st.markdown("### 🗺️ מפת תחנות")
+                        m = folium.Map(location=loc, zoom_start=16)
+                        
+                        # סימון המיקום הנוכחי
+                        folium.Marker(
+                            loc,
+                            popup="<b>המיקום שלי</b>",
+                            icon=folium.Icon(color='red', icon='user', prefix='fa'),
+                            tooltip="אני כאן"
+                        ).add_to(m)
+                        
+                        # סימון התחנות
+                        for station in stations:
+                            popup_html = f"""
+                            <div class='station-popup' style='width:250px'>
+                                <h4 style='margin:0; color:#007bff'>🚏 {station['name']}</h4>
+                                <hr style='margin:8px 0'>
+                                <p style='font-size:13px'>{station['vicinity']}</p>
+                                <p style='color:#666'>📏 מרחק: {station['distance']} מטר</p>
+                                <a href='https://www.google.com/maps/dir/?api=1&destination={station['lat']},{station['lng']}' 
+                                   target='_blank'>
+                                    <button style='background:#4CAF50; color:white; border:none; 
+                                                   padding:8px 16px; border-radius:5px; cursor:pointer'>
+                                        🧭 נווט לתחנה
+                                    </button>
+                                </a>
+                            </div>
+                            """
+                            
+                            folium.Marker(
+                                [station['lat'], station['lng']],
+                                popup=folium.Popup(popup_html, max_width=300),
+                                tooltip=f"{station['name']} ({station['distance']}מ')",
+                                icon=folium.Icon(color='blue', icon='bus', prefix='fa')
+                            ).add_to(m)
+                        
+                        plugins.LocateControl(auto_start=use_gps).add_to(m)
+                        components.html(m._repr_html_(), height=600)
+                    
+                    # עמודת הרשימה
+                    with col_list:
+                        st.markdown("### 📋 רשימת תחנות")
+                        st.caption(f"נמצאו {len(stations)} תחנות בקרבת מקום")
+                        
+                        for idx, station in enumerate(stations[:10]):  # מגביל ל-10 ראשונות
+                            # כרטיס תחנה
+                            st.markdown(f"""
+                            <div class='station-item'>
+                                <div class='station-name'>🚏 {station['name']}</div>
+                                <div class='station-distance'>📏 {station['distance']} מטר</div>
+                                <div style='font-size:12px; color:#999; margin-top:5px'>
+                                    {station['vicinity'][:40]}...
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # כפתור ניווט
+                            if st.button(
+                                "🧭 נווט",
+                                key=f"nav_station_{idx}",
+                                help=f"פתח ניווט ל-{station['name']}"
+                            ):
+                                st.success(f"פותח ניווט ל-{station['name']}")
+                                # ניתן להוסיף כאן אינטגרציה עם הטאב הראשון
+                    
+                    st.success(f"✅ נמצאו {len(stations)} תחנות בטווח של 500 מטר")
+                else:
+                    st.warning("⚠️ לא נמצאו תחנות באזור זה")
+
+st.markdown("---")
+st.caption("🚍 SmartBus Ultimate | מופעל ע״י Google Maps Traffic Data + GTFS ישראל")
