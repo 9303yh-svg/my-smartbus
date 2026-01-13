@@ -53,54 +53,84 @@ def init_db():
 def get_route_details(line_num):
     try:
         conn = sqlite3.connect(DB_FILE)
-        routes = pd.read_sql_query(f"SELECT * FROM routes WHERE TRIM(route_short_name)='{line_num.strip()}'", conn)
+        # חיפוש גמיש יותר
+        routes = pd.read_sql_query(f"SELECT * FROM routes WHERE route_short_name LIKE '%{line_num.strip()}%' LIMIT 1", conn)
         if routes.empty:
             conn.close()
+            st.warning(f"לא נמצא קו {line_num} במאגר GTFS")
             return None
         
         route_id = routes.iloc[0]['route_id']
-        route_name = routes.iloc[0]['route_long_name']
+        route_name = routes.iloc[0].get('route_long_name', f"קו {line_num}")
         
-        trips = pd.read_sql_query(f"""
-            SELECT DISTINCT direction_id, trip_headsign, shape_id, trip_id
-            FROM trips 
-            WHERE route_id='{route_id}' 
-            ORDER BY direction_id
-        """, conn)
+        # קבלת כיוונים עם טיפול בשגיאות
+        try:
+            trips = pd.read_sql_query(f"""
+                SELECT direction_id, trip_headsign, shape_id, trip_id
+                FROM trips 
+                WHERE route_id='{route_id}' 
+                GROUP BY direction_id
+                LIMIT 2
+            """, conn)
+        except:
+            trips = pd.DataFrame()
+        
+        if trips.empty:
+            # נסיון חלופי בלי direction_id
+            trips = pd.read_sql_query(f"""
+                SELECT shape_id, trip_id, trip_headsign
+                FROM trips 
+                WHERE route_id='{route_id}' 
+                LIMIT 2
+            """, conn)
+            if not trips.empty:
+                trips['direction_id'] = range(len(trips))
         
         directions = []
         for _, trip in trips.head(2).iterrows():
-            direction_id = trip['direction_id']
-            headsign = trip['trip_headsign']
-            shape_id = trip['shape_id']
-            trip_id = trip['trip_id']
+            direction_id = trip.get('direction_id', 0)
+            headsign = trip.get('trip_headsign', f'כיוון {direction_id+1}')
+            shape_id = trip.get('shape_id', '')
+            trip_id = trip.get('trip_id', '')
             
-            shape_data = pd.read_sql_query(f"""
-                SELECT shape_pt_lat, shape_pt_lon 
-                FROM shapes 
-                WHERE shape_id='{shape_id}' 
-                ORDER BY shape_pt_sequence
-            """, conn)
+            # מסלול
+            polyline = []
+            if shape_id:
+                try:
+                    shape_data = pd.read_sql_query(f"""
+                        SELECT shape_pt_lat, shape_pt_lon 
+                        FROM shapes 
+                        WHERE shape_id='{shape_id}' 
+                        ORDER BY shape_pt_sequence
+                        LIMIT 200
+                    """, conn)
+                    if not shape_data.empty:
+                        polyline = list(zip(shape_data['shape_pt_lat'].values[::2], 
+                                          shape_data['shape_pt_lon'].values[::2]))
+                except:
+                    pass
             
-            polyline = list(zip(shape_data['shape_pt_lat'].values[::2], 
-                              shape_data['shape_pt_lon'].values[::2])) if not shape_data.empty else []
-            
-            stations = pd.read_sql_query(f"""
-                SELECT s.stop_name, s.stop_lat, s.stop_lon, st.stop_sequence
-                FROM stop_times st
-                JOIN stops s ON st.stop_id = s.stop_id
-                WHERE st.trip_id = '{trip_id}'
-                ORDER BY st.stop_sequence
-            """, conn)
-            
+            # תחנות
             stations_list = []
-            for _, station in stations.iterrows():
-                stations_list.append({
-                    'name': station['stop_name'],
-                    'lat': station['stop_lat'],
-                    'lon': station['stop_lon'],
-                    'sequence': station['stop_sequence']
-                })
+            if trip_id:
+                try:
+                    stations = pd.read_sql_query(f"""
+                        SELECT s.stop_name, s.stop_lat, s.stop_lon, st.stop_sequence
+                        FROM stop_times st
+                        JOIN stops s ON st.stop_id = s.stop_id
+                        WHERE st.trip_id = '{trip_id}'
+                        ORDER BY st.stop_sequence
+                        LIMIT 50
+                    """, conn)
+                    for _, station in stations.iterrows():
+                        stations_list.append({
+                            'name': station['stop_name'],
+                            'lat': station['stop_lat'],
+                            'lon': station['stop_lon'],
+                            'sequence': station['stop_sequence']
+                        })
+                except:
+                    pass
             
             directions.append({
                 'direction_id': direction_id,
